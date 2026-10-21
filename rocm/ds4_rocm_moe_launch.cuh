@@ -1586,7 +1586,21 @@ static int routed_moe_launch(
                 }
             } else if (ok) {
                 dim3 qgrid((expert_mid_dim + 127u) / 128u, pair_count, 1);
-                if (q4k_path) {
+                // Opt-in tile-rs path (DS4_TILE_Q4K_GU=1): single-token decode, no
+                // write-aux, no clamp. Anything it declines falls through to the engine kernel.
+                static const bool tile_q4k_gu_on = [] {
+                    const char *e = getenv("DS4_TILE_Q4K_GU");
+                    return e != NULL && e[0] == '1';
+                }();
+                const bool tile_q4k_gu_done = q4k_path && tile_q4k_gu_on &&
+                    pair_count == n_expert && write_gate_up == 0 && clamp <= 1.0e-6f &&
+                    ds4_tile_q4k_gu_mid((float *)mid->ptr, gate_w, up_w, xq,
+                                        (const int32_t *)selected_exec->ptr,
+                                        (const float *)weights->ptr, gate_expert_bytes,
+                                        gate_row_bytes, xq_blocks, expert_mid_dim, n_expert) == 0;
+                if (tile_q4k_gu_done) {
+                    // Handled by the tile-rs kernel.
+                } else if (q4k_path) {
                     moe_gate_up_mid_decode_q4K_qwarp32_kernel<<<qgrid, 256>>>(
                         (float *)gate->ptr,
                         (float *)up->ptr,
@@ -1871,16 +1885,29 @@ static int routed_moe_launch(
             if (use_direct_down_sum6) {
                 dim3 sgrid((out_dim + 31u) / 32u, 1, 1);
                 if (q4k_path) {
-                    moe_down_q4K_sum6_qwarp32_kernel<<<sgrid, 256>>>(
-                        (float *)out->ptr,
-                        down_w,
-                        midq,
-                        (const int32_t *)selected_exec->ptr,
-                        down_expert_bytes,
-                        down_row_bytes,
-                        midq_blocks,
-                        out_dim,
-                        n_expert);
+                    // Opt-in tile-rs path (DS4_TILE_Q4K_DOWN=1). Anything it declines falls
+                    // through to the engine kernel.
+                    static const bool tile_q4k_down_on = [] {
+                        const char *e = getenv("DS4_TILE_Q4K_DOWN");
+                        return e != NULL && e[0] == '1';
+                    }();
+                    const bool tile_q4k_down_done = tile_q4k_down_on &&
+                        ds4_tile_q4k_down_sum6((float *)out->ptr, down_w, midq,
+                                               (const int32_t *)selected_exec->ptr,
+                                               down_expert_bytes, down_row_bytes, midq_blocks,
+                                               out_dim, n_expert) == 0;
+                    if (!tile_q4k_down_done) {
+                        moe_down_q4K_sum6_qwarp32_kernel<<<sgrid, 256>>>(
+                            (float *)out->ptr,
+                            down_w,
+                            midq,
+                            (const int32_t *)selected_exec->ptr,
+                            down_expert_bytes,
+                            down_row_bytes,
+                            midq_blocks,
+                            out_dim,
+                            n_expert);
+                    }
                 } else if (mxfp4_path) {
                     dim3 mxgrid((out_dim + 7u) / 8u, n_tokens, 1);
                     if (n_tokens == 1u) {

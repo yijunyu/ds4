@@ -163,6 +163,17 @@ extern "C" int ds4_gpu_dspark_gfx1151_fast_path(void) {
 
 #include "rocm/ds4_rocm_moe.cuh"
 
+// tile-rs generated q4_K gate/up kernel (rocm/tile/); opt-in via DS4_TILE_Q4K_GU=1.
+// Returns 0 when it ran, nonzero when the shape or layout is not one it supports.
+// tile-rs generated q4_K down kernel (rocm/tile/); opt-in via DS4_TILE_Q4K_DOWN=1.
+extern "C" int ds4_tile_q4k_down_sum6(float *out, const void *down_w, const void *midq,
+                                      const int32_t *selected, uint64_t down_expert_bytes,
+                                      uint64_t down_row_bytes, uint32_t midq_blocks,
+                                      uint32_t out_dim, uint32_t n_expert);
+extern "C" int ds4_tile_q4k_gu_mid(float *mid, const void *gate_w, const void *up_w, const void *xq,
+                                   const int32_t *selected, const float *weights, uint64_t gate_expert_bytes,
+                                   uint64_t gate_row_bytes, uint32_t xq_blocks, uint32_t expert_mid_dim,
+                                   uint32_t n_expert);
 #include "rocm/ds4_rocm_moe_launch.cuh"
 
 #include "rocm/ds4_rocm_glm.cuh"

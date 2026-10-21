@@ -63,7 +63,8 @@ ROCM_CFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFOR
 ROCM_LDLIBS ?= -lm -pthread -lhipblas -lhipblaslt -lrocblas
 ROCM_MMQ_Y ?= 64
 ROCM_MMQ_FLAGS := $(ROCM_CFLAGS) -std=c++17 -DGGML_USE_HIP -DDS4_HIP_MMQ_Y=$(ROCM_MMQ_Y) $(MMQ_INCLUDES)
-ROCM_MMQ_OBJS := cuda/mmq/ds4_ggml_stubs.rocm.o cuda/mmq/ds4_mmq.rocm.o cuda/mmq/quantize.rocm.o cuda/mmq/mmid.rocm.o cuda/mmq/mmvq.rocm.o cuda/mmq/d2r_stubs.rocm.o
+ROCM_TILE_OBJS := rocm/tile/ds4_tile_q4k_gu.rocm.o rocm/tile/ds4_tile_q4k_down.rocm.o
+ROCM_MMQ_OBJS := cuda/mmq/ds4_ggml_stubs.rocm.o cuda/mmq/ds4_mmq.rocm.o cuda/mmq/quantize.rocm.o cuda/mmq/mmid.rocm.o cuda/mmq/mmvq.rocm.o cuda/mmq/d2r_stubs.rocm.o $(ROCM_TILE_OBJS)
 DS4_LINK ?= $(NVCC) $(NVCCFLAGS)
 DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
@@ -1048,6 +1049,12 @@ cuda/mmq/ds4_mmq.rocm.o: cuda/mmq/ds4_mmq.cu cuda/mmq/ds4_mmq.h cuda/mmq/mmq.cuh
 
 cuda/mmq/quantize.rocm.o: cuda/mmq/quantize.cu cuda/mmq/quantize.cuh cuda/mmq/common.cuh cuda/mmq/ds4_ggml_stubs.h cuda/mmq/mmq.cuh cuda/mmq/vendors/hip.h
 	$(HIPCC) $(ROCM_MMQ_FLAGS) -c -o $@ $<
+
+rocm/tile/ds4_tile_q4k_down.rocm.o: rocm/tile/ds4_tile_q4k_down.hip
+	$(HIPCC) $(ROCM_CFLAGS) -std=c++17 -fPIC -c -o $@ rocm/tile/ds4_tile_q4k_down.hip
+
+rocm/tile/ds4_tile_q4k_gu.rocm.o: rocm/tile/ds4_tile_q4k_gu.hip rocm/tile/gumoe_2048x6144.cu rocm/tile/cuda_shim.h rocm/tile/cuda_runtime.h rocm/tile/cuda_fp16.h
+	$(HIPCC) $(ROCM_CFLAGS) -std=c++17 -fPIC -Irocm/tile -c -o $@ rocm/tile/ds4_tile_q4k_gu.hip
 
 cuda/mmq/mmid.rocm.o: cuda/mmq/mmid.cu cuda/mmq/mmid.cuh cuda/mmq/common.cuh cuda/mmq/ds4_ggml_stubs.h cuda/mmq/vendors/hip.h
 	$(HIPCC) $(ROCM_MMQ_FLAGS) -c -o $@ $<
