@@ -185,6 +185,7 @@ extern "C" int ds4_tile_q4k_gu_mid(float *mid, const void *gate_w, const void *u
 #include "ds4_glm53_vision_gpu.cuh"
 #include "ds4_deepseek4_vision_gpu.cuh"
 #include "rocm/ds4_rocm_deepseek4_vision.cuh"
+#include "ds4_deepseek41_cuda.cuh"
 
 /* Tensor-parallel gates are Metal-only; stubs keep shared graph code
  * linkable (TP option validation rejects non-Metal backends). */
