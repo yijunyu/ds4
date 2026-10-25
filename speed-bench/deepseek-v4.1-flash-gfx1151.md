@@ -212,6 +212,44 @@ missing graph. Porting the ordered-read policy from `ds4_cuda.cu` into the ROCm
 streaming path is the obvious experiment, and is what the fork's 22 t/s prefill
 suggests is achievable.
 
+"Usefully" stays modest even on the fork: ~7 t/s decode, ~116 s to first token on
+the 15.6K Claude Code prompt, single user only, and either/or with the MiniCPM
+service for the memory pool. Unexplored headroom: the 6-7 t/s measured here is ~30%
+below the branch's published 10.2-10.5 t/s, attributed above to HIP 7.1 here versus
+ROCm 10.0 / hipBLASLt 100401 there.
+
+### Serving it from the fork: build location and the two patches it needs
+
+The build used for the measurements is still on this box, so nothing has to be
+rebuilt to serve V4.1 today:
+
+    /data/ds4-v41            binaries dated 2026-10-03, clean tree
+    branch                   feat/rocm-deepseek41-halo @ d32febf (2026-09-30)
+    remotes                  origin = kyuz0/ds4, antirez = antirez/ds4
+
+It is behind on ROCm numerics, however. `d32febf` predates the two 2026-10-09
+correctness commits that this branch carries as cherry-picks, and all three of their
+changes are missing. Verified by content, not by revision: `git merge-base
+--is-ancestor` is useless across these repos because it fails the same way for an
+absent commit and for an unknown one.
+
+    5c3b0a4 log1p precision        MISSING  fork still has the pre-fix one-liner
+                                            `return __ocml_log1p_f32(x);`
+    5c3b0a4 signed-zero sort ties  MISSING  0 hits in rocm/ds4_rocm_indexer.cuh
+    f3ee00a exact-row Q8 on decode MISSING  cuda_matmul_q8_0_tensor_labeled present,
+                                            `decode_rows` absent
+
+The log1p one is the one to care about. Upstream's comment is that OCML unsafe-math
+reduces `log1p(x)` to `log(1+x)` and loses small router probabilities; on a MoE model
+that changes which experts are selected, so it is an output-quality issue rather than
+a last-bit numerics one.
+
+Both patches apply cleanly to the fork tree -- `git apply --check` returns 0 for all
+four files (`ds4_rocm_compat.cu`, `rocm/ds4_rocm_matmul.cuh`, `ds4_rocm.h`,
+`rocm/ds4_rocm_indexer.cuh`). So cherry-picking `f3ee00a` and `5c3b0a4` onto
+`feat/rocm-deepseek41-halo` and rebuilding should give both the fork's prefill speed
+and the corrected router arithmetic. Not yet done, and not yet measured.
+
 ## Raw data
 progress.txt (all rows), ds4_kyuz0/ ds4_pr4_split/ llamacpp_hip/ (server logs),
 loadgen.py, run_ds4.sh, run_llama.sh, cc_req_0.json (captured Claude Code request).
