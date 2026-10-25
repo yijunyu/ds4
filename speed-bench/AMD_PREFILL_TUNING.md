@@ -86,10 +86,15 @@ backend changed rather than just the flags. The prefill cost versus ROCm's tuned
 ### Where things live
 
 - `~/.config/systemd/user/ds4-minicpm-vulkan.service` — the backend, enabled at boot,
-  bound to the LAN with the shared key.
-- `~/.config/systemd/user/ds4-minicpm-lan.service` — the PolyStrata unit, **kept on
-  disk and disabled** for rollback (`systemctl --user start ds4-minicpm-lan` after
-  stopping the Vulkan one).
+  bound to the LAN with the shared key. Committed here as
+  `speed-bench/systemd/ds4-minicpm-vulkan.service`, verbatim, so the one copy that
+  used to exist only under `~/.config` is no longer the only copy. It carries absolute
+  `/home/yijun` paths rather than `%h` for the build, SDK and model locations, because
+  that is what runs; another machine has to edit them.
+- `~/.config/systemd/user/ds4-minicpm-lan.service.retired` — the PolyStrata unit, no
+  longer a rollback path. It was renamed out of systemd's way on 2026-10-16 because
+  its `.venv/bin/python` dangled into a removed uv CPython tree, so it could not start
+  even before being retired.
 - `/home/yijun/llama-vulkan/bin/` — the Vulkan build, copied out of the source tree
   so a rebuild cannot remove it.
 - `/home/yijun/vulkan-sdk/x86_64/` — the LunarG SDK (1.9 GB), moved out of `/tmp` so
@@ -100,12 +105,20 @@ backend changed rather than just the flags. The prefill cost versus ROCm's tuned
 
 ### Rollback
 
+Not to PolyStrata — that unit is retired and its interpreter is gone (above). What
+rollback means now is the previous *binary* under the same unit:
+
 ```bash
 systemctl --user stop ds4-minicpm-vulkan
-systemctl --user start ds4-minicpm-lan
+# restore /home/yijun/llama-tile/bin from bin.before_update_20261024, then
+systemctl --user start ds4-minicpm-vulkan
 ```
 
-Only one 21 GB model may be resident; the units are mutually exclusive by design.
+Only one 21 GB model may be resident. This unit states that in a comment but does not
+enforce it; the prepared V4.1 unit declares `Conflicts=` on this one, and what actually
+arbitrates between models now is `mind-arbiter`, which owns this unit through
+`systemctl --user` and refuses to start a model that will not fit beside what is
+already up.
 
 ## tile-rs q4_K kernels: investigated, not adopted (2026-10-17)
 
@@ -391,7 +404,18 @@ look ~60× faster than the hardware can actually do cold.
 ### Where things live (updated)
 
 - `~/.config/systemd/user/ds4-minicpm-vulkan.service` — the live unit, with the four
-  adopted settings plus `--mmproj`. Enabled at boot.
+  adopted settings plus `--mmproj`. Enabled at boot, and committed verbatim as
+  `speed-bench/systemd/ds4-minicpm-vulkan.service`.
+- `--slot-save-path /data/kvcache/minicpm` (added 2026-10-25) — enables
+  `POST /slots/{id}?action=save|restore`, which is how `mind-arbiter` carries this
+  model's prompt caches across a swap to another model. Measured: a 3,926-token prefix
+  costs 3,029 ms to prefill cold and comes back as **4 tokens in 56 ms** after a full
+  stop/start. It changes no inference numbers — nothing is saved unless that endpoint
+  is called. Two things to know before copying it: `--parallel` defaults to *auto*,
+  which chose **4** slots here rather than 1, so anything saving slots by index must
+  read `total_slots` from `/props`; and a ~4K-token slot wrote ~330 MiB, of which
+  ~190 MiB is context checkpoints rather than KV (marginal cost ~20 KiB/token), so
+  four full 131072-token slots project to ~10 GiB. Files are overwritten each save.
 - `/home/yijun/llama-tile/bin/` — the installed build the service runs.
   **Rollback:** `/home/yijun/llama-tile/bin.before_update_20261024`.
 - `/home/yijun/llama-tile/shaders/{moe_q4k,moe_q6k}.spv` — the tile shaders.
