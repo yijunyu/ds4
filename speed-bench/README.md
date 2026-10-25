@@ -1,6 +1,9 @@
 ## Benchmarking
 
-Here we collect prefill and generation speed obtained with different hardware.
+Here we collect prefill and generation speed obtained with different hardware. See also:
+
+- [`gfx1151-prefill-results.md`](gfx1151-prefill-results.md) — DeepSeek V4 Flash prefill benchmarks
+- [`minicpm-v4.7-35b-a3b-gfx1151.md`](minicpm-v4.7-35b-a3b-gfx1151.md) — MiniCPM-V 4.7 35B-A3B performance on gfx1151
 
 Run `ds4-bench` as:
 
