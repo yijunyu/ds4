@@ -4,6 +4,7 @@ Here we collect prefill and generation speed obtained with different hardware. S
 
 - [`gfx1151-prefill-results.md`](gfx1151-prefill-results.md) — DeepSeek V4 Flash prefill benchmarks
 - [`minicpm-v4.7-35b-a3b-gfx1151.md`](minicpm-v4.7-35b-a3b-gfx1151.md) — MiniCPM-V 4.7 35B-A3B performance on gfx1151
+- [`AMD_PREFILL_TUNING.md`](AMD_PREFILL_TUNING.md) — gfx1151 prefill and service tuning on llama.cpp + Vulkan: which knobs were adopted, which were measured and rejected, and why
 
 Run `ds4-bench` as:
 
