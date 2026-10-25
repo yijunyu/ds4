@@ -149,19 +149,30 @@ Note that automatic sizing plans **100.97 GiB**, above both the 95.67 and 99.67 
 plans the 2026-10-03 sweep watchdog killed. It did not OOM here; MemAvailable fell to
 85 GiB and held flat for the whole session.
 
-Prefill, however, does not finish in a usable time. Two single-user `short` requests
-through the same `loadgen.py`:
+It is far too slow to use, though. Two single-user `short` requests through the same
+`loadgen.py`. The first was abandoned at a 600 s client cap of my own making after
+reading ~70 GiB without emitting a `prefill chunk` line; the second ran to
+completion against the cache that first one had filled:
 
-    cold  940 tokens  >11 min, no `prefill chunk` line, ~70 GiB read, then abandoned
-                      when the client hit a 600 s cap (loadgen itself allows 7200 s)
-    warm  942 tokens  >5.7 min and still running at the time of this commit;
-                      115 GiB cumulative read, 120-410 MiB/s
+    1025 08:17:25 prefill chunk 942/942 (100.0%) avg=0.91 t/s 1038.786s
+    1025 08:17:25 prompt done 1038.790s
+    1025 08:18:30 gen=32 decoding chunk=0.49 t/s avg=0.49 t/s 65.109s
+    1025 08:18:30 gen=32 finish=length 1103.900s
 
-Both are lower bounds, not measurements. For the same prompt on the same box, the
-kyuz0 fork logged `prefill chunk 943/943 (100.0%) avg=22.05 t/s 42.762s` and then
-`gen=32 decoding chunk=6.02 t/s`. Mainline is at least an order of magnitude slower
-on prefill, and the warm request reads *more* than the cold one, so the 82.70 GiB
-expert cache is not retaining what the next token needs.
+loadgen recorded `prefill 0.90 t/s, decode 0.51 t/s` for that request: 17.3 minutes
+to first token on a 942-token prompt. Against the fork on this same box and prompt
+(`avg=22.05 t/s 42.762s`, then `decoding chunk=6.02 t/s`):
+
+    | metric  | kyuz0 fork | mainline ROCm | ratio |
+    |---------|-----------:|--------------:|------:|
+    | prefill | 22.05 t/s  | 0.90 t/s      | 24.5x |
+    | decode  | 6.02 t/s   | 0.51 t/s      | 11.8x |
+
+That places mainline ROCm between the two Oct 3 extremes: about twice the llama.cpp
+HIP prefill that was written off as unusable, and ~24x short of the engine that
+works. The warm request read *more* than the cold one (123 GiB cumulative), so the
+82.70 GiB expert cache is not retaining what the next token needs, and this is not
+cold-start cost.
 
 ### Why: the ordered-read optimization is CUDA-only
 
@@ -184,6 +195,13 @@ reads, and V4.1 keeps its Engram tables (189 GiB of the 365.7 GB file) disk-only
 
 This is upstream's own warning in `docs/STRIX_HALO.md` -- "large prefills are not yet
 tuned on this backend and can be slow" -- except it already bites at 940 tokens.
+
+It does not, however, explain the decode number. `ee7e840` says it preserves "the
+original order for single-token decode and cache seeding", so its absence on ROCm
+should leave decode untouched, yet decode is also 11.8x down. Whatever starves
+decode is therefore a second factor -- most likely expert-cache retention or the
+disk-only Engram lookups each token performs -- and is not diagnosed here. Treat
+the ordered-read gap as the explanation for prefill only.
 
 ### Standing verdict
 
