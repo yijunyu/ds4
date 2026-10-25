@@ -126,7 +126,76 @@ about the expert cache.
 V4.1 variant that addresses (1) and (2) is at
 `/data/v41bench/ds4-v41.service.ready` — not installed.
 
+## Mainline ROCm measured: starts, serves, but prefill is I/O-bound (2026-10-25)
+
+MiniCPM was stopped to free the pool (MemAvailable 114.1 GiB, port 8000 clear) and
+mainline `ds4-server` at `94c7f08` was started with upstream's documented recipe,
+`--ssd-streaming --ctx 4096`, automatic cache sizing, no `--power`:
+
+    ds4: ROCm backend initialized on Radeon 8060S Graphics (sm_115)
+    ds4:   rocm recommends 124.00 GiB working set
+    ds4:   using 80% total for model + cached experts: 99.20 GiB
+    ds4: rocm SSD streaming cache target 89.82 GiB; effective 89.82 GiB
+         = 7.12 GiB prefill headroom + 82.70 GiB dynamic cache (8922 experts)
+    ds4: ROCm startup model preparation covered 9.38 GiB of tensor spans in 8.589s
+    ds4: memory: KV 0.03 + buffers 1.74 + resident model 9.37 + expert cache 82.70
+         + prefill expert reserve 7.12 = 100.97 GiB planned
+    ds4: V4.1 static context buffers 1815.21 MiB (ctx=4096), Engram disk-only
+    ds4-server: listening on http://127.0.0.1:8000
+
+It comes up in ~30 s, serves `/v1/models` as `deepseek-v4.1-flash`, and the backend
+gate does not refuse: mainline V4.1 on ROCm is real, as the static reading predicted.
+Note that automatic sizing plans **100.97 GiB**, above both the 95.67 and 99.67 GiB
+plans the 2026-10-03 sweep watchdog killed. It did not OOM here; MemAvailable fell to
+85 GiB and held flat for the whole session.
+
+Prefill, however, does not finish in a usable time. Two single-user `short` requests
+through the same `loadgen.py`:
+
+    cold  940 tokens  >11 min, no `prefill chunk` line, ~70 GiB read, then abandoned
+                      when the client hit a 600 s cap (loadgen itself allows 7200 s)
+    warm  942 tokens  >5.7 min and still running at the time of this commit;
+                      115 GiB cumulative read, 120-410 MiB/s
+
+Both are lower bounds, not measurements. For the same prompt on the same box, the
+kyuz0 fork logged `prefill chunk 943/943 (100.0%) avg=22.05 t/s 42.762s` and then
+`gen=32 decoding chunk=6.02 t/s`. Mainline is at least an order of magnitude slower
+on prefill, and the warm request reads *more* than the cold one, so the 82.70 GiB
+expert cache is not retaining what the next token needs.
+
+### Why: the ordered-read optimization is CUDA-only
+
+The read pattern is small and random -- 120-410 MiB/s against a drive measured at
+~3.2 GB/s sequential. Upstream fixed exactly this, but not for this backend.
+`ee7e840 cuda: improve SSD-streamed prefill with ordered expert reads` adds
+file-ordered, coalesced expert reads, and all 118 lines of it land in `ds4_cuda.cu`:
+
+    docs/SSD_STREAMING.md | 19 ++
+    ds4.c                 |  7 +-
+    ds4_cuda.cu           | 118 ++++++++++++---
+
+The ROCm build does not compile that translation unit. `Makefile:322` substitutes
+`ds4_rocm.o` + `ds4_rocm_compat.o` for `ds4_cuda.o`, and `ds4_rocm.cu` (8.5 KB, vs
+1.57 MB for `ds4_cuda.cu`) is an independent unit assembled from `rocm/*.cuh`; it
+contains zero references to `ds4_cuda`. The rollback switch is spelled
+`DS4_CUDA_DISABLE_SSD_SORT_SELECTED_READS`, and the commit message records
+validation "with Metal and CUDA builds" only. So ROCm still issues unordered expert
+reads, and V4.1 keeps its Engram tables (189 GiB of the 365.7 GB file) disk-only.
+
+This is upstream's own warning in `docs/STRIX_HALO.md` -- "large prefills are not yet
+tuned on this backend and can be slow" -- except it already bites at 940 tokens.
+
+### Standing verdict
+
+For serving V4.1 on this box the 2026-10-03 verdict holds: the kyuz0 branch is still
+the only engine that does it usefully. What changed is that mainline now *runs* it,
+so the gap is a tractable optimization gap in one translation unit rather than a
+missing graph. Porting the ordered-read policy from `ds4_cuda.cu` into the ROCm
+streaming path is the obvious experiment, and is what the fork's 22 t/s prefill
+suggests is achievable.
+
 ## Raw data
 progress.txt (all rows), ds4_kyuz0/ ds4_pr4_split/ llamacpp_hip/ (server logs),
 loadgen.py, run_ds4.sh, run_llama.sh, cc_req_0.json (captured Claude Code request).
 cache_84GB/ cache_88GB/ cache_92GB/ memline.txt (expert-cache sizing, 2026-10-03).
+mainline_test/ (server_ctx4096.log, memwatch.log, 2026-10-25 mainline run).
