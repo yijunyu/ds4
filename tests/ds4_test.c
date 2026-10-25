@@ -7321,6 +7321,13 @@ typedef struct {
     test_fn fn;
 } ds4_test_entry;
 
+/* The server unit tests are the only entry that runs without a model; every
+ * other one opens an engine on test_model_path(). Kept as a predicate rather
+ * than a struct field so the entry table stays byte-identical to upstream. */
+static bool test_entry_needs_model(const ds4_test_entry *entry) {
+    return strcmp(entry->flag, "--server") != 0;
+}
+
 static const ds4_test_entry test_entries[] = {
 #ifndef DS4_NO_GPU
     {"--qwen4-prefill-checkpoints", "qwen4-prefill-checkpoints", "Qwen chunk checkpoints restore matching logits and state", test_qwen_prefill_checkpoints},
@@ -7450,14 +7457,37 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (run_all) {
-        for (size_t i = 0; i < sizeof(test_entries) / sizeof(test_entries[0]); i++) {
-            test_run_entry(&test_entries[i]);
+    /* DeepSeek V4.1 supersedes the V4 `ds4flash.gguf` checkpoint, which is no
+     * longer kept on every machine. Every entry but `--server` opens an engine
+     * on that path, so when it is absent they are skipped with a notice rather
+     * than reported as failures -- a missing checkpoint is not a regression.
+     * Point DS4_TEST_MODEL at a checkpoint to run them. */
+    bool have_model = true;
+#ifndef DS4_NO_GPU
+    const char *test_model = test_model_path();
+    have_model = access(test_model, R_OK) == 0;
+    if (!have_model) {
+        fprintf(stderr,
+                "ds4 tests: model '%s' not found; skipping model-backed tests "
+                "(set DS4_TEST_MODEL to run them)\n",
+                test_model);
+    }
+#endif
+    size_t skipped_no_model = 0;
+
+    for (size_t i = 0; i < sizeof(test_entries) / sizeof(test_entries[0]); i++) {
+        if (!run_all && !selected[i]) continue;
+        if (!have_model && test_entry_needs_model(&test_entries[i])) {
+            fprintf(stderr, "%s: SKIP (no model)\n", test_entries[i].name);
+            skipped_no_model++;
+            continue;
         }
-    } else {
-        for (size_t i = 0; i < sizeof(test_entries) / sizeof(test_entries[0]); i++) {
-            if (selected[i]) test_run_entry(&test_entries[i]);
-        }
+        test_run_entry(&test_entries[i]);
+    }
+
+    if (skipped_no_model) {
+        fprintf(stderr, "ds4 tests: %zu test(s) skipped for want of a model\n",
+                skipped_no_model);
     }
 
 #ifndef DS4_NO_GPU
