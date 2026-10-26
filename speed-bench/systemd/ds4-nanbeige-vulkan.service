@@ -23,25 +23,36 @@ Environment=GGML_VK_ALLOW_GRAPHICS_QUEUE=1
 # replace the expert matvec kernels, and this model has no experts -- it is dense,
 # unlike MiniCPM-V 4.7's 35B-A3B. They would do nothing here.
 EnvironmentFile=%h/.local/state/ds4-local/lan-service.env
-# -c 65536 rather than the advertised 524288. This model's KV is 208 KiB/token
-# (52 layers x 8 KV heads x 128, f16), about ten times MiniCPM's measured ~20 KiB,
-# so its full context would want 104 GiB of KV on a 122 GiB box. At 65536 the KV is
-# ~13 GiB and the whole model ~32 GiB, which leaves room for MiniCPM to stay
-# resident beside it. Raise with --cache-type-k/-v q8_0 if the context matters more
-# than the numerics.
+# -c 131072 rather than the advertised 524288. This model's KV is 208 KiB/token at
+# f16 (52 layers x 8 KV heads x 128), about ten times MiniCPM's measured ~20 KiB, so
+# the full context would want 104 GiB of KV on a 122 GiB box.
+# -ctk/-ctv q8_0 halves that, and it is what makes 131072 affordable: measured 34.1
+# GiB of the pool here, against 32.8 GiB for 65536 with an f16 cache. Twice the
+# context for 1.3 GiB, which is the whole reason for quantizing the cache rather
+# than a general preference. The cost is 2% of prefill (279 vs 285 tok/s) and some
+# cache numerics; both were measured, see the sweep note below.
+# Verified that quantized KV does not break persistence, which is the one thing that
+# would have ruled it out: a 2927-token slot saved in 78 ms and restored into a
+# *different* slot index in 24 ms, turning 9479 ms of prefill into 101 ms. Slot files
+# are 113 KiB/token, so a full pair projects to ~14 GiB on --slot-save-path.
 # --parallel 2 is stated rather than left to default: --parallel defaults to auto,
 # which picks 4 on this box, and the slot count in the registry has to agree with
 # the server or the extra slots are never saved (mind-arbiter checks this at startup
-# and warns). 65536 total means 32768 per slot.
-# -b 8192 -ub 1024 carried over from the MiniCPM tuning; measured there, not here.
-# Measured at these settings: 33.1 GiB of the pool, prefill 109.6 tok/s, decode
-# 10.2 tok/s (dense, so every token reads all 19.4 GiB of weights -- MiniCPM gets
-# 68.6 by activating ~3B of its 35B). A saved slot is 218 KiB/token.
+# and warns). 131072 total means 65536 per slot.
+# -b 8192 -ub 1024 came from the MiniCPM tuning, and a sweep here found it makes no
+# difference to this model: -ub 512/1024/2048 measured 281/285/288 tok/s of prefill,
+# a 2.5% spread that is noise. Kept for consistency with the other unit, but nothing
+# about these two numbers is tuned for Nanbeige -- do not read them as measured.
+# Measured: prefill 285 tok/s on a 6329-token prompt, decode 9.7 tok/s. Decode is a
+# sixth of MiniCPM's 68.6 because this model is dense and every token reads all
+# 19.4 GiB of weights, where MiniCPM activates ~3B of its 35B.
+# Beware a small prompt for prefill: 43 tokens measured 109.6 tok/s here, which is
+# latency, not throughput, and is not comparable to MiniCPM's pp2048 figures.
 ExecStart=/home/yijun/llama-tile/bin/llama-server \
   -m /data/gguf/Nanbeige4.3-33B-Q4_K_M.gguf \
-  -c 65536 --parallel 2 -ngl 99 --host 127.0.0.1 --port 8003 -t 16 --no-webui \
+  -c 131072 --parallel 2 -ngl 99 --host 127.0.0.1 --port 8003 -t 16 --no-webui \
   --alias nanbeige4.3-33b --jinja --reasoning-format deepseek \
-  -fa on -b 8192 -ub 1024 \
+  -fa on -b 8192 -ub 1024 -ctk q8_0 -ctv q8_0 \
   --slot-save-path /data/kvcache/nanbeige --api-key ${DS4_LAN_API_KEY}
 # Loopback only. MiniCPM binds the LAN for direct clients that predate the router;
 # nothing reaches this one except mind-arbiter on the same host, so there is no
@@ -51,7 +62,7 @@ RestartSec=10
 OOMPolicy=stop
 LimitNOFILE=65535
 KillMode=mixed
-# Long enough for a slot save of ~13 GiB to finish before SIGKILL: the arbiter asks
+# Long enough for a slot save of ~14 GiB to finish before SIGKILL: the arbiter asks
 # the server to save its slots before stopping it, and a truncated save is a cold
 # slot on the way back.
 TimeoutStopSec=120
