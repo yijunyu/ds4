@@ -29,8 +29,14 @@ EnvironmentFile=%h/.local/state/ds4-local/lan-service.env
 # -ctk/-ctv q8_0 halves that, and it is what makes 131072 affordable: measured 34.1
 # GiB of the pool here, against 32.8 GiB for 65536 with an f16 cache. Twice the
 # context for 1.3 GiB, which is the whole reason for quantizing the cache rather
-# than a general preference. The cost is 2% of prefill (279 vs 285 tok/s) and some
-# cache numerics; both were measured, see the sweep note below.
+# than a general preference. The cost is 2% of prefill (279 vs 285 tok/s) and, as far
+# as perplexity can see, nothing else: wikitext-2 against an f16 cache, paired per
+# chunk, gives +0.06% at 2048 context and -0.17% at 16384, neither significant, with
+# the effect bounded to +-0.18% at the longer one. The point of running both is that
+# cache quantization error should accumulate with context, so a short-context result
+# alone would prove little -- across 8x of context it does not grow, and the sign
+# flips, which is what noise looks like. 16384 is still only a quarter of a slot
+# here, so this bounds the cache rather than clearing the whole 65536.
 # Verified that quantized KV does not break persistence, which is the one thing that
 # would have ruled it out: a 2927-token slot saved in 78 ms and restored into a
 # *different* slot index in 24 ms, turning 9479 ms of prefill into 101 ms. Slot files
