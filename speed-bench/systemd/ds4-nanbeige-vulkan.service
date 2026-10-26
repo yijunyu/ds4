@@ -1,0 +1,60 @@
+[Unit]
+# Nanbeige4.3-33B on llama.cpp + Vulkan (RADV/gfx1151). A dense 33.1B released
+# 2026-10-24 under Apache-2.0, aimed at agentic coding; its own benchmark claims
+# (Terminal-Bench 2.1 80.9 against Qwen3.8-27B's 73.0) are unreplicated, which is
+# why the registry marks it opt_in rather than making it routable by default.
+#
+# Plain LlamaForCausalLM, so no new llama.cpp support is involved. The quants were
+# cut at b11845 and llama-tile is b11854-5, which is past it.
+#
+# Started and stopped by mind-arbiter, never enabled: it cannot be resident
+# alongside DeepSeek V4.1, and the arbiter is what knows that.
+Description=DS4 local Nanbeige4.3-33B service (llama.cpp Vulkan, API key required)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/llama-vulkan/bin
+# The Vulkan loader lives in the SDK we unpacked, not in /usr (no root needed).
+Environment=LD_LIBRARY_PATH=/home/yijun/llama-tile/bin:/home/yijun/vulkan-sdk/x86_64/lib:/home/yijun/vulkan-sdk/x86_64/lib/VulkanLoader/lib
+Environment=GGML_VK_ALLOW_GRAPHICS_QUEUE=1
+# Deliberately NOT setting LLAMA_TILE_MMVQ4K_SPV / MMVQ6K_SPV. Those tile-rs shaders
+# replace the expert matvec kernels, and this model has no experts -- it is dense,
+# unlike MiniCPM-V 4.7's 35B-A3B. They would do nothing here.
+EnvironmentFile=%h/.local/state/ds4-local/lan-service.env
+# -c 65536 rather than the advertised 524288. This model's KV is 208 KiB/token
+# (52 layers x 8 KV heads x 128, f16), about ten times MiniCPM's measured ~20 KiB,
+# so its full context would want 104 GiB of KV on a 122 GiB box. At 65536 the KV is
+# ~13 GiB and the whole model ~32 GiB, which leaves room for MiniCPM to stay
+# resident beside it. Raise with --cache-type-k/-v q8_0 if the context matters more
+# than the numerics.
+# --parallel 2 is stated rather than left to default: --parallel defaults to auto,
+# which picks 4 on this box, and the slot count in the registry has to agree with
+# the server or the extra slots are never saved (mind-arbiter checks this at startup
+# and warns). 65536 total means 32768 per slot.
+# -b 8192 -ub 1024 carried over from the MiniCPM tuning; measured there, not here.
+# Measured at these settings: 33.1 GiB of the pool, prefill 109.6 tok/s, decode
+# 10.2 tok/s (dense, so every token reads all 19.4 GiB of weights -- MiniCPM gets
+# 68.6 by activating ~3B of its 35B). A saved slot is 218 KiB/token.
+ExecStart=/home/yijun/llama-tile/bin/llama-server \
+  -m /data/gguf/Nanbeige4.3-33B-Q4_K_M.gguf \
+  -c 65536 --parallel 2 -ngl 99 --host 127.0.0.1 --port 8003 -t 16 --no-webui \
+  --alias nanbeige4.3-33b --jinja --reasoning-format deepseek \
+  -fa on -b 8192 -ub 1024 \
+  --slot-save-path /data/kvcache/nanbeige --api-key ${DS4_LAN_API_KEY}
+# Loopback only. MiniCPM binds the LAN for direct clients that predate the router;
+# nothing reaches this one except mind-arbiter on the same host, so there is no
+# reason to offer it a listener off-box. The key is still required.
+Restart=on-failure
+RestartSec=10
+OOMPolicy=stop
+LimitNOFILE=65535
+KillMode=mixed
+# Long enough for a slot save of ~13 GiB to finish before SIGKILL: the arbiter asks
+# the server to save its slots before stopping it, and a truncated save is a cold
+# slot on the way back.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target
