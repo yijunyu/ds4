@@ -48,11 +48,30 @@ EnvironmentFile=%h/.local/state/ds4-local/lan-service.env
 # 19.4 GiB of weights, where MiniCPM activates ~3B of its 35B.
 # Beware a small prompt for prefill: 43 tokens measured 109.6 tok/s here, which is
 # latency, not throughput, and is not comparable to MiniCPM's pp2048 figures.
+#
+# --spec-type ngram-simple is the only thing that moves decode on this model, and it
+# moves it a long way: 37.6 tok/s against 10.1 on an edit-this-file prompt, 3.7x,
+# with 249 of 249 drafted tokens accepted. No engine can do that -- decode here runs
+# 202 GB/s of a ~256 GB/s pool, so anything reading these weights one token at a time
+# is within a quarter of this number whatever its kernels look like. Drafting wins by
+# verifying several tokens per pass instead of going faster. n-max 4 beat 8 (37.6 vs
+# 36.5), and no draft model is involved: the n-grams come from the prompt, which is
+# why it pays on agentic coding and not on prose (10.85 vs 10.14 there, so it costs
+# nothing when it misses).
+# It is NOT bit-reproducible, which is the price. Greedy output was byte-identical to
+# non-speculative decode on the copy-heavy prompt, but diverged at byte 693 on free
+# prose -- same claim, different wording. Both n-max 4 and 8 produced the *same*
+# divergent text, which points at the numerics of batched verification rather than a
+# drafting fault, and is the same class of effect as -ub changing prefill numerics on
+# the MiniCPM unit (KLD 0.0044 there). Worth knowing before trusting that unit's
+# claim of "identical greedy output" as a general property: on this model it holds
+# for copied text and not for prose. Drop this flag if a run has to be reproducible.
 ExecStart=/home/yijun/llama-tile/bin/llama-server \
   -m /data/gguf/Nanbeige4.3-33B-Q4_K_M.gguf \
   -c 131072 --parallel 2 -ngl 99 --host 127.0.0.1 --port 8003 -t 16 --no-webui \
   --alias nanbeige4.3-33b --jinja --reasoning-format deepseek \
   -fa on -b 8192 -ub 1024 -ctk q8_0 -ctv q8_0 \
+  --spec-type ngram-simple --spec-draft-n-max 4 \
   --slot-save-path /data/kvcache/nanbeige --api-key ${DS4_LAN_API_KEY}
 # Loopback only. MiniCPM binds the LAN for direct clients that predate the router;
 # nothing reaches this one except mind-arbiter on the same host, so there is no
