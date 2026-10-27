@@ -4469,7 +4469,11 @@ static inline float ds4_vec_dot_q5_q6_K_f32(uint32_t type, int n, const uint8_t 
  * uint64 words of eight signed bytes, read through an int8_t pointer exactly as
  * ggml does, which assumes the little-endian hosts ds4 targets. */
 static void ds4_dequantize_iq1_m_block(const block_iq1_m *x, float *out) {
-    const uint16_t *sc = (const uint16_t *)(const void *)x->scales;
+    /* scales is uint8_t[8] but is read as four uint16 words. Copy rather than
+     * cast: reading one through a pointer to the other is a strict-aliasing
+     * violation, and this file is built at -O3 -ffast-math. */
+    uint16_t sc[4];
+    memcpy(sc, x->scales, sizeof(sc));
 
     const uint16_t sbits = (uint16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00F0) |
                                       ((sc[2] >> 4) & 0x0F00) | (sc[3] & 0xF000));
@@ -4500,6 +4504,9 @@ static void ds4_dequantize_iq1_m_block(const block_iq1_m *x, float *out) {
     }
 }
 
+/* No caller yet: the routed-expert path uses the q8_K form below. Kept as the
+ * companion of ds4_vec_dot_iq2_xxs_f32 for the f32 reference and trace paths,
+ * which are not wired for IQ1_M. */
 static DS4_MAYBE_UNUSED float ds4_vec_dot_iq1_m_f32(int n, const block_iq1_m *x,
                                                     const float *y) {
     const int nb = n / QK_K;
@@ -4523,14 +4530,14 @@ static DS4_MAYBE_UNUSED float ds4_vec_dot_iq1_m_f32(int n, const block_iq1_m *x,
  *     sum_j (grid[j] + delta) * q8[j]  ==  sum_j grid[j]*q8[j] + delta*sum_j q8[j]
  *
  * keeps the grid part in integers and applies each half's sub-scale once. */
-static DS4_MAYBE_UNUSED void ds4_vec_dot_iq1_m_q8_K(int n, float *s,
-                                                    const block_iq1_m *x,
-                                                    const block_q8_K *y) {
+static void ds4_vec_dot_iq1_m_q8_K(int n, float *s, const block_iq1_m *x,
+                                   const block_q8_K *y) {
     const int nb = n / QK_K;
     float sumf = 0.0f;
 
     for (int i = 0; i < nb; i++) {
-        const uint16_t *sc = (const uint16_t *)(const void *)x[i].scales;
+        uint16_t sc[4];                    /* see the note in the dequantiser */
+        memcpy(sc, x[i].scales, sizeof(sc));
         const uint16_t sbits = (uint16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00F0) |
                                           ((sc[2] >> 4) & 0x0F00) | (sc[3] & 0xF000));
         const float d = f16_to_f32(sbits) * y[i].d;
@@ -10855,7 +10862,7 @@ static void matvec_iq1_m_accum_worker(void *vctx, uint64_t row0, uint64_t row1) 
     }
 }
 
-static DS4_MAYBE_UNUSED void matvec_iq1_m_experts_accum_prequant(
+static void matvec_iq1_m_experts_accum_prequant(
         float            *out,
         const ds4_model  *m,
         const ds4_tensor *w,
@@ -10937,7 +10944,7 @@ static void matvec_iq1_m_mid_worker(void *vctx, uint64_t row0, uint64_t row1) {
     }
 }
 
-static DS4_MAYBE_UNUSED void matvec_iq1_m_experts_mid_prequant(
+static void matvec_iq1_m_experts_mid_prequant(
         float            *mid,
         const ds4_model  *m,
         const ds4_tensor *gate_w,
