@@ -3962,6 +3962,19 @@ extern "C" int ds4_mmq_iq2_xxs_moe_vec(
         n_tokens, n_experts, n_expert_used, stream);
 }
 
+// IQ1_M has no tiled MMQ loader, so this vector entry point is the only way to
+// reach IQ1_M routed experts on the GPU. Prefill therefore goes through it too,
+// which is slower than a tiled kernel would be; see
+// docs/IQ1_M_ROUTED_EXPERTS.md.
+extern "C" int ds4_mmq_iq1_m_moe_vec(
+        const void * W, const float * X, const int32_t * ids, float * out,
+        int M, int K, int n_tokens, int n_experts, int n_expert_used,
+        cudaStream_t stream) {
+    return ds4_mmq_moe_vec_impl<GGML_TYPE_IQ1_M>(
+        "ds4_mmq_iq1_m_moe_vec", W, X, ids, out, M, K,
+        n_tokens, n_experts, n_expert_used, stream);
+}
+
 extern "C" int ds4_mmq_q4_K_moe_vec(
         const void * W, const float * X, const int32_t * ids, float * out,
         int M, int K, int n_tokens, int n_experts, int n_expert_used,

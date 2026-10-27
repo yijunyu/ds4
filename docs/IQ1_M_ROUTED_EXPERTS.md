@@ -73,6 +73,38 @@ finer scale storage, following the precedent of the K-quant loaders rather
 than `load_tiles_iq1_s`. That is the one genuinely novel piece of work here,
 and it is why upstream llama.cpp has an IQ1_S MMQ loader but not an IQ1_M one.
 
+## What GSQ-RCO actually contains
+
+Read from the GGUF header of shard 1 (a 48 MiB range request, no full
+download). Expert dimensions match what ds4 expects for deepseek41 —
+gate/up `[5120, 2304, 384]`, down `[2304, 5120, 384]`, i.e. `DS4_N_EMBD`
+5120, `DS4_N_FF_EXP` 2304, `DS4_N_EXPERT` 384.
+
+The important part is that **precision is mixed within a layer**:
+
+| layer | gate | up | down |
+|---|---|---|---|
+| blk.0 - blk.6 | IQ1_M | IQ1_M | IQ1_M |
+| blk.7, blk.8 | IQ1_M | IQ1_M | **IQ2_XXS** |
+| blk.9 | IQ1_M | IQ1_M | IQ1_M |
+| blk.10 | IQ2_XXS | IQ2_XXS | IQ2_XXS |
+| blk.11 | IQ2_XXS | IQ2_XXS | **IQ1_M** |
+
+So gate and up agree with each other in every layer seen, but `down` varies
+independently in both directions. `ds41_stream_table` currently demands one
+exact combination:
+
+```c
+if (t[i]->type != (i == 2 ? DS4_TENSOR_Q2_K : DS4_TENSOR_IQ2_XXS) || ...
+```
+
+which is wrong for GSQ-RCO twice over — `down` is never Q2_K in it, and
+gate/up may be IQ1_M. The fix is to type the three roles independently against
+a permitted set rather than against one expected pair. The surrounding
+machinery already tolerates `down` differing from gate/up, since that is
+exactly the V4.1 Q2 shape (IQ2_XXS gate/up, Q2_K down), so this is a widening
+of an existing distinction rather than a new one.
+
 ## Trap: two grid conventions
 
 The codebook exists in two forms and they are off by one, so transcribing the
@@ -140,10 +172,15 @@ Staged so that each step is independently verifiable, cheapest first.
    `ds4_die`: the `matvec_*_prequant` dispatchers, `layer_routed_moe_batch`,
    `ds41_stream_table` and `ds4_engine_open_internal`.
 
-3. **Parity test before any tile work.** `cuda/mmq/test/test_mmq_parity.cu`
-   and `test_mmq_soa_tiles.cu` already exist as harnesses, so IQ1_M
-   correctness is checkable against the CPU reference in
-   `gguf-tools/quants.c` without downloading 112 GiB.
+3. **Correctness before any tile work** — done for the CPU reference.
+   `tests/test_iq1_m_dequant.c` checks the layout against hand-derived values
+   and is wired into `test` and `test-rocm`.
+
+   Note that `cuda/mmq/test/test_mmq_parity.cu` and `test_mmq_soa_tiles.cu`
+   have **no Makefile targets**, so they are source files rather than a
+   harness that can simply be pointed at a new type. Validating a GPU IQ1_M
+   kernel means first giving one of them a build rule, with the CPU
+   dequantiser as the oracle.
 
 4. **`load_tiles_iq1_m` plus a finer-grained tile layout** — the hard step
    above. Only worth starting once 1-3 hold.
