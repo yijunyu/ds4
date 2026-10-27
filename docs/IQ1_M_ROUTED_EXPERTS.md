@@ -116,6 +116,63 @@ machinery already tolerates `down` differing from gate/up, since that is
 exactly the V4.1 Q2 shape (IQ2_XXS gate/up, Q2_K down), so this is a widening
 of an existing distinction rather than a new one.
 
+## Fatal: ds4 cannot open the GSQ-RCO file at all, and IQ1_M is not why
+
+Everything below this section is still accurate about IQ1_M, but it is not the
+binding constraint. GSQ-RCO fails at model open, before any expert type is
+examined, because it packages Engram differently from the V4.1 Q2 release.
+
+`model_unmap_engram()` runs unconditionally at `ds4.c:2950`, straight after
+`parse_tensors`, with no resident/streaming and no CPU/GPU distinction:
+
+```c
+if (!model_get_string(m, "general.architecture", &arch) ||
+    !ds4_streq(arch, "deepseek41")) return;              /* not us: skip */
+if (!model_get_string(m, "deepseek41.engram.encoding", &encoding) ||
+    !ds4_streq(encoding, "e4m3_e8m0_32_row264"))
+    ds4_die("unsupported V4.1 Engram row encoding");     /* <- dies here */
+```
+
+The architecture *is* `deepseek41`, so the early return does not fire. Read
+from shard 1's header, GSQ-RCO has these Engram keys and **no
+`engram.encoding` among them**:
+
+```
+deepseek41.engram.file            = DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf
+deepseek41.engram.layer_ids       = [2 items]
+deepseek41.engram.num_embeddings  = [2 items]
+deepseek41.engram.present         = 1
+deepseek41.engram.source          = 1bae0e1088993b9b82de08f59de5be5a34e42170
+```
+
+So the first `model_get_string` fails and ds4 dies. The mismatch is structural,
+not a missing string:
+
+| | V4.1 Q2 (works today) | GSQ-RCO 1017 |
+|---|---|---|
+| Engram location | inline in the model mapping (~189 GiB of its 341 GiB) | separate file, named by `engram.file` |
+| row encoding | `e4m3_e8m0_32_row264` | IQ4_NL |
+| index tensors | `blk.{1,14}.engram_embd.weight`, type 24 (I8), `dim[0] == 264` | `engram_token_map` (I32), `engram_primes`, `engram_offsets`, `engram_multipliers` (I64) |
+
+That last row is the deep part. ds4 expects two dense I8 tables of 264-byte
+rows living in the main model's tensor list; GSQ-RCO ships a hash-based scheme
+(primes, offsets and multipliers over a compressed 99,092-entry token map) in a
+separate IQ4_NL file. Supporting it means an external-Engram loader, an IQ4_NL
+row decoder and a different lookup algorithm — a new Engram subsystem, not an
+added case, and needed whether the model runs resident or streamed.
+
+This also closes the resident idea. Residency would have bypassed the expert
+cache's uniform-slot-size rule described below, but not this: the engram check
+runs before any of that and does not care how the model will be executed.
+
+### Standing
+
+The IQ1_M work on this branch (CPU dequantiser, q8_K dot product, both expert
+matvecs, the `_moe_vec` entry point, 13/13 tests) is correct and is a usable
+contribution toward issue #1268, since IQ1_M support is wanted independently.
+It does not make GSQ-RCO loadable, and nothing short of the Engram work above
+will.
+
 ## Blocker: the expert cache wants one slot size for every layer
 
 This is the finding that sets the real cost of the project, and it is not a
