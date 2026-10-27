@@ -1193,6 +1193,12 @@ static const uint8_t ksigns_iq2xs[128] = {
     240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255,
 };
 
+/* IQ1_S/IQ1_M share a 2048-entry codebook. Mirrored from ggml-common.h by
+ * scripts/gen_iq1_grid.py; see the header of the generated file. */
+#include "ds4_iq1_tables.inc"
+
+#define DS4_IQ1M_DELTA 0.125f
+
 static const uint64_t iq2xxs_grid[256] = {
     0x0808080808080808, 0x080808080808082b, 0x0808080808081919, 0x0808080808082b08,
     0x0808080808082b2b, 0x0808080808190819, 0x0808080808191908, 0x08080808082b0808,
@@ -4445,6 +4451,77 @@ static inline float ds4_vec_dot_q5_q6_K_f32(uint32_t type, int n, const uint8_t 
     }
     return 0.0f;
 }
+
+/* Expand one IQ1_M superblock (256 values) to f32.
+ *
+ * IQ1_M is the only block in this file with no leading scale field.  Following
+ * vec_dot_iq1_m_q8_1 (cuda/mmq/vecdotq.cuh:1223), which is the authoritative
+ * layout in this tree: the f16 superblock scale is four nibbles spread across
+ * scales[], the sub-scales are 3-bit at a granularity of 16 values, and the
+ * delta sign is bit 3 of each qh nibble, so one delta per 8 values.  Each
+ * value is then
+ *
+ *     d * (2*k + 1) * (grid[j] + delta)
+ *
+ * for superblock scale d, the 3-bit sub-scale k covering this half of the
+ * 32-value group, and delta of +/-DELTA -- see the note at the delta itself,
+ * which does not match the GPU expression verbatim.  The codebook entries are
+ * uint64 words of eight signed bytes, read through an int8_t pointer exactly as
+ * ggml does, which assumes the little-endian hosts ds4 targets. */
+static void ds4_dequantize_iq1_m_block(const block_iq1_m *x, float *out) {
+    const uint16_t *sc = (const uint16_t *)(const void *)x->scales;
+
+    const uint16_t sbits = (uint16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00F0) |
+                                      ((sc[2] >> 4) & 0x0F00) | (sc[3] & 0xF000));
+    const float d = f16_to_f32(sbits);
+
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        const int tmp = sc[ib / 2] >> (6 * (ib % 2));
+        const float dl[2] = {
+            d * (float)(2 * ((tmp >> 0) & 0x07) + 1),
+            d * (float)(2 * ((tmp >> 3) & 0x07) + 1),
+        };
+
+        for (int l = 0; l < 4; l++) {
+            const int qhl = x->qh[2 * ib + l / 2] >> (4 * (l % 2));
+            const int8_t *grid =
+                (const int8_t *)(iq1s_grid + (x->qs[4 * ib + l] | ((qhl & 0x07) << 8)));
+            /* Two grid conventions exist and mixing them costs exactly 1.0 per
+             * value.  iq1s_grid_gpu stores {0,1,2} and pairs with a delta of
+             * -1 +/- DELTA, where the -1 is there only to undo that offset.
+             * The CPU table used here stores {-1,0,+1} already, so the delta
+             * is just +/- DELTA.  Entry 1 is 0x00000002 in the GPU table and
+             * 0xffffffffffffff01 in this one, which pins the relation. */
+            const float delta = (qhl & 0x08) ? -DS4_IQ1M_DELTA : DS4_IQ1M_DELTA;
+            for (int j = 0; j < 8; j++) {
+                out[32 * ib + 8 * l + j] = dl[l / 2] * ((float)grid[j] + delta);
+            }
+        }
+    }
+}
+
+static DS4_MAYBE_UNUSED float ds4_vec_dot_iq1_m_f32(int n, const block_iq1_m *x,
+                                                    const float *y) {
+    const int nb = n / QK_K;
+    float sumf = 0.0f;
+    float blk[QK_K];
+
+    for (int i = 0; i < nb; i++) {
+        ds4_dequantize_iq1_m_block(x + i, blk);
+        const float *yb = y + (uint64_t)i * QK_K;
+        for (int j = 0; j < QK_K; j++) sumf += blk[j] * yb[j];
+    }
+    return sumf;
+}
+
+#ifdef DS4_TEST_HOOKS
+/* tests/test_iq1_m_dequant.c checks the layout against hand-derived values.
+ * The block is passed as void * so the test does not need block_iq1_m, which
+ * is private to this translation unit. */
+void ds4_test_dequantize_iq1_m_block(const void *block, float *out) {
+    ds4_dequantize_iq1_m_block((const block_iq1_m *)block, out);
+}
+#endif
 
 static float ds4_vec_dot_iq2_xxs_f32(int n, const block_iq2_xxs *x, const float *y) {
     pthread_once(&iq2xxs_signed_grid_once, iq2xxs_signed_grid_init);

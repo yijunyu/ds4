@@ -73,6 +73,25 @@ finer scale storage, following the precedent of the K-quant loaders rather
 than `load_tiles_iq1_s`. That is the one genuinely novel piece of work here,
 and it is why upstream llama.cpp has an IQ1_S MMQ loader but not an IQ1_M one.
 
+## Trap: two grid conventions
+
+The codebook exists in two forms and they are off by one, so transcribing the
+GPU arithmetic onto the CPU table silently biases every value by -1.0.
+
+| table | value alphabet | paired delta |
+|---|---|---|
+| `iq1s_grid_gpu` (uint32, nibbles) | `{0, 1, 2}` | `-1 +/- IQ1M_DELTA` |
+| `iq1s_grid` (uint64, bytes) | `{-1, 0, +1}` | `+/- IQ1M_DELTA` |
+
+The `-1` in the GPU delta exists only to cancel the `+1` offset baked into
+`iq1s_grid_gpu`. Entry 1 pins the relation: it is `0x00000002` in the GPU table
+and `0xffffffffffffff01` in the CPU one, so `g_gpu = g_cpu + 1`.
+
+This was caught by `tests/test_iq1_m_dequant.c` rather than by reading, and it
+is worth noting that one of that test's cases initially agreed with the buggy
+code because the error happened to cancel for `g_cpu = 0`. Any future IQ1_M
+work should keep a case with `g_cpu = +1`, where nothing cancels.
+
 ## Plan
 
 Staged so that each step is independently verifiable, cheapest first.
@@ -90,10 +109,36 @@ Staged so that each step is independently verifiable, cheapest first.
    `ds4.c:2351` already carries `{"iq1_m", 256, 56}`.
 
    Scope warning: **58 sites in `ds4.c` hardcode `DS4_TENSOR_IQ2_XXS`**, and
-   they are not one switch — they run through the deepseek41 routed-expert
-   path (`8358`, `11710`, `13607`, `16693`, `20183`, `22665`, …). This branch
-   deliberately touches only the sites the streaming path reaches, and leaves
-   the rest, so the diff stays reviewable. Full genericity is a later project.
+   they are not one switch. `scripts/map_iq2_sites.py` maps each to its
+   enclosing function: 58 sites in 33 functions, grouping as follows. (It
+   attributes the enum definition itself to `align_up`, which is a harmless
+   artefact of scanning backwards for the nearest definition.)
+
+   **Other architectures, out of scope** (10 functions): everything named
+   `glm_*` (`8377`, `8479`, `16712`, `16720`, `16729`, `47669`, `47753`) and
+   `qwen4_*` (`59254`, `59260`, `68736`).
+
+   **On the deepseek41 ROCm path, in scope** (21 functions). Note that the
+   `metal_graph_*` prefix is misleading and does **not** mean Metal-only: the
+   family includes `metal_graph_cuda_tp_*` helpers that read `DS4_CUDA_TP_*`
+   environment variables, and `metal_graph_decode_cuda_selected_slots_expected`
+   is called from the CUDA/ROCm decode path at `23455`, `23528`, `26818` and
+   `26852`. Treat it as the shared graph scheduler. The group covers
+   `metal_graph_*` (`20202`, `20265`, `20301`, `22684`, `22759`, `22805`,
+   `22853`, `24299`, `29391`, `32951`), the CPU `matvec_*_prequant` dispatchers
+   (`10854`, `11729`, `11754`, `11776`, `11831`), `layer_routed_moe_batch`
+   (`13626`, `13734`), `ds41_stream_table` (`41134`),
+   `ds41_cuda_row_batch_supported` (`43268`) and `ds4_engine_open_internal`
+   (`72574`, `72618`).
+
+   **Deferred**: `ds4_session_dspark_seed_batch_enabled` (`61957`, `61967`).
+
+   Most of the in-scope entries are `*_supported` / `*_expected` / `*_eligible`
+   predicates that gate a fast path, so returning false for IQ1_M is the
+   correct behaviour and they need no change — the generic path takes over.
+   The ones that must be extended are the handful that otherwise reach a
+   `ds4_die`: the `matvec_*_prequant` dispatchers, `layer_routed_moe_batch`,
+   `ds41_stream_table` and `ds4_engine_open_internal`.
 
 3. **Parity test before any tile work.** `cuda/mmq/test/test_mmq_parity.cu`
    and `test_mmq_soa_tiles.cu` already exist as harnesses, so IQ1_M
