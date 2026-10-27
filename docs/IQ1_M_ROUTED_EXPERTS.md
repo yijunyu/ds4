@@ -116,6 +116,78 @@ machinery already tolerates `down` differing from gate/up, since that is
 exactly the V4.1 Q2 shape (IQ2_XXS gate/up, Q2_K down), so this is a widening
 of an existing distinction rather than a new one.
 
+## Blocker: the expert cache wants one slot size for every layer
+
+This is the finding that sets the real cost of the project, and it is not a
+type-switch problem.
+
+A 232 GiB model cannot be resident on a 122.2 GiB pool, so GSQ-RCO has to go
+down the SSD streaming path. On ROCm that path is mandatory, not best-effort:
+`ds41_stream_cache_configure` (`ds4.c:70312`, under
+`DS4_ROCM_BUILD && DS4_HAS_DEEPSEEK41_GPU`) fails the engine open outright.
+
+```c
+if (!ds41_stream_table(&e->model, &e->weights.layer[il], il, &table)) {
+    fprintf(stderr, "ds4: V4.1 ROCm SSD streaming requires uniform "
+                    "IQ2_XXS/Q2_K experts (layer %u)\n", il);
+    return false;
+}
+const uint64_t bytes = 2u * table.gate_expert_bytes + table.down_expert_bytes;
+if (expert && expert != bytes) return false;
+```
+
+There is no CPU fallback here — the engine refuses to open — and the second
+check requires **every layer to have the same expert slot size**. The slot
+sizes GSQ-RCO actually presents, computed from the per-role types above (the
+row-byte arithmetic agrees with `v41_mmq_topology`'s own hardcoded 1320 and
+756, so these are sound):
+
+| layers | gate/up, down | `2*gate + down` bytes |
+|---|---|---|
+| blk.0-6, blk.9 | IQ1_M, IQ1_M | 7,741,440 |
+| blk.7, blk.8 | IQ1_M, IQ2_XXS | 8,202,240 |
+| blk.10 | IQ2_XXS, IQ2_XXS | 9,123,840 |
+| blk.11 | IQ2_XXS, IQ1_M | 8,663,040 |
+| *(V4.1 Q2 today)* | *IQ2_XXS, Q2_K* | *9,953,280* |
+
+Four distinct sizes where the allocator admits one. Supporting GSQ-RCO on the
+streaming path therefore means reworking the expert cache to handle per-layer
+variable slot sizes — a change to the slot allocator and its reservation logic
+(`ds4_gpu_stream_expert_cache_reserve_layers`, the two-layer admission at
+`ds4.c:73927`), not an added case.
+
+There is also a second, separate gap: **the ROCm MoE does not use the
+`cuda/mmq` `_moe_vec` entry points at all.** `routed_moe_build_plan`
+(`rocm/ds4_rocm_moe_launch.cuh:537`) enumerates five `(gate, down)` pairs and
+returns 0 for anything else:
+
+```c
+plan->q4k_path     = (gate_type == 12u && down_type == 12u);
+plan->iq2_path     = (gate_type == 16u && down_type == 10u);
+plan->iq2_iq2_path = (gate_type == 16u && down_type == 16u);
+plan->q2k_path     = (gate_type == 10u && down_type == 10u);
+plan->mxfp4_path   = (gate_type == 39u && down_type == 39u);
+```
+
+GSQ-RCO needs three more — (29,29), (29,16) and (16,29) — each backed by ROCm
+kernels in `rocm/ds4_rocm_moe*.cuh`. So `ds4_mmq_iq1_m_moe_vec`, added earlier
+on this branch, serves the CUDA path and the parity harness but is **not** what
+the ROCm production MoE calls.
+
+### What this means for the plan
+
+The CPU work (dequantiser, q8_K dot, both matvecs) is correct and tested and
+remains the foundation for anything else, but it does not by itself produce a
+runnable GSQ-RCO: the streaming gate rejects the model before any expert
+matvec is reached.
+
+The cheaper remaining option is worth weighing against the slot-allocator
+rework. GSQ-RCO's main weights are 112.44 GiB, which is **under** the 122.2 GiB
+pool, so a resident configuration would bypass `ds41_stream_cache_configure`
+entirely and with it the uniformity requirement. That trades a large allocator
+change for a very tight memory budget, and it needs measuring rather than
+assuming — see the DSpark arithmetic at the end of this file.
+
 ## Trap: two grid conventions
 
 The codebook exists in two forms and they are off by one, so transcribing the
