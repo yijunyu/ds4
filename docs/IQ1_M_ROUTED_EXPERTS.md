@@ -190,13 +190,48 @@ This also closes the resident idea. Residency would have bypassed the expert
 cache's uniform-slot-size rule described below, but not this: the engram check
 runs before any of that and does not care how the model will be executed.
 
+### It is the whole 1017 generation, not one quantiser
+
+Checked `mrfakename/DeepSeek-V4.1-Flash-1017-GGUF` `Q2_K` the same way, from
+shard 1's header. It is a plain Q2_K requantisation with no exotic expert
+types at all, and it **also** has no `deepseek41.engram.encoding`, so it dies
+in `model_unmap_engram` just the same. Its Engram index is the same hash
+scheme, carried as metadata arrays rather than tensors:
+
+```
+deepseek41.engram.primes         = [48 items]
+deepseek41.engram.offsets        = [48 items]
+deepseek41.engram.multipliers    = [8 items]
+deepseek41.engram.token_map      = [129280 items]
+deepseek41.engram.head_count     = 8
+deepseek41.engram.key_length     = 256
+deepseek41.engram.max_ngram_size = 4
+```
+
+It carries no `engram.file` key, so unlike GSQ-RCO its Engram weights are not
+external; they are in a later shard. The two releases therefore differ from
+each other in where the tables live, but agree in replacing the
+`e4m3_e8m0_32_row264` encoding and the dense I8 264-byte-row index with a
+hashed one.
+
+So the conclusion is broader than this branch: **no 1017 checkpoint loads in
+this engine**, whatever its quantisation, because the 1017 generation changed
+the Engram metadata and indexing scheme and ds4 at `d32febf` understands only
+the earlier one. That is presumably the substance of upstream issue #1224
+("Support 10/17 update"), which is a larger change than a download-URL
+refresh.
+
+The flip side: the work is not GSQ-RCO-specific. Hashed Engram support would
+unlock every 1017 variant at once, and the plain Q2_K one needs no new expert
+kernels — only 246 GiB of disk against the 341 GiB in use today.
+
 ### Standing
 
 The IQ1_M work on this branch (CPU dequantiser, q8_K dot product, both expert
-matvecs, the `_moe_vec` entry point, 13/13 tests) is correct and is a usable
-contribution toward issue #1268, since IQ1_M support is wanted independently.
-It does not make GSQ-RCO loadable, and nothing short of the Engram work above
-will.
+matvecs, the `_moe_vec` entry point, 13/13 tests plus GPU parity) is correct
+and is a usable contribution toward issue #1268, since IQ1_M support is wanted
+independently. It does not make any 1017 checkpoint loadable, and nothing
+short of the Engram work above will.
 
 ## Blocker: the expert cache wants one slot size for every layer
 
