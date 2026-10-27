@@ -3249,6 +3249,12 @@ template <> struct ds4_mmq_vdr_mmvq_value<GGML_TYPE_IQ2_XXS> { static constexpr 
 template <> struct ds4_mmq_vdr_mmvq_value<GGML_TYPE_Q2_K>    { static constexpr int value = VDR_Q2_K_Q8_1_MMVQ; };
 template <> struct ds4_mmq_vdr_mmvq_value<GGML_TYPE_Q4_K>    { static constexpr int value = VDR_Q4_K_Q8_1_MMVQ; };
 template <> struct ds4_mmq_vdr_mmvq_value<GGML_TYPE_MXFP4>   { static constexpr int value = VDR_MXFP4_Q8_1_MMVQ; };
+// IQ1_M rides the vector path only. There is no load_tiles_iq1_m, so the tiled
+// MMQ kernels cannot be instantiated for it: the tile carries one half2 scale
+// per 32 values, while IQ1_M needs a scale per 16 and a delta sign per 8, and
+// its 3-bit sub-scales are odd integers up to 15 that would overflow dp4a's
+// int8 lanes if folded into the grid values.
+template <> struct ds4_mmq_vdr_mmvq_value<GGML_TYPE_IQ1_M>   { static constexpr int value = VDR_IQ1_M_Q8_1_MMVQ; };
 
 template <ggml_type type>
 static __device__ __forceinline__ float ds4_mmq_vec_dot_q8_1(
@@ -3262,6 +3268,8 @@ static __device__ __forceinline__ float ds4_mmq_vec_dot_q8_1(
         return vec_dot_q2_K_q8_1(W, X_q8, kbx, iqs);
     } else if constexpr (type == GGML_TYPE_Q4_K) {
         return vec_dot_q4_K_q8_1(W, X_q8, kbx, iqs);
+    } else if constexpr (type == GGML_TYPE_IQ1_M) {
+        return vec_dot_iq1_m_q8_1(W, X_q8, kbx, iqs);
     } else {
         static_assert(type == GGML_TYPE_MXFP4, "unsupported fused vector type");
         return vec_dot_mxfp4_q8_1(W, X_q8, kbx, iqs);

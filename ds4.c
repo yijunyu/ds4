@@ -1095,6 +1095,17 @@ typedef struct {
     uint8_t qs[QK_MXFP4 / 2];
 } block_mxfp4;
 
+/* 1.75 bpw.  Unlike every other block here there is no leading scale: the f16
+ * superblock scale is split into four nibbles spread across scales[], and the
+ * sub-scales are 3-bit fields at a granularity of 16 values.  See
+ * docs/IQ1_M_ROUTED_EXPERTS.md for the reassembly and why it makes the tiled
+ * MMQ path awkward. */
+typedef struct {
+    uint8_t qs[QK_K / 8];
+    uint8_t qh[QK_K / 16];
+    uint8_t scales[QK_K / 32];
+} block_iq1_m;
+
 #define DS4_STATIC_ASSERT(name, cond) typedef char name[(cond) ? 1 : -1]
 DS4_STATIC_ASSERT(ds4_block_q2_k_size, sizeof(block_q2_K) == 84);
 DS4_STATIC_ASSERT(ds4_block_q4_k_size, sizeof(block_q4_K) == 144);
@@ -1103,6 +1114,7 @@ DS4_STATIC_ASSERT(ds4_block_q6_k_size, sizeof(block_q6_K) == 210);
 DS4_STATIC_ASSERT(ds4_block_q8_k_size, sizeof(block_q8_K) == 292);
 DS4_STATIC_ASSERT(ds4_block_iq2_xxs_size, sizeof(block_iq2_xxs) == 66);
 DS4_STATIC_ASSERT(ds4_block_mxfp4_size, sizeof(block_mxfp4) == 17);
+DS4_STATIC_ASSERT(ds4_block_iq1_m_size, sizeof(block_iq1_m) == 56);
 
 typedef struct {
     uint32_t ctx_size;
@@ -2366,6 +2378,7 @@ enum {
     DS4_TENSOR_Q8_K     = 15,
     DS4_TENSOR_IQ2_XXS  = 16,
     DS4_TENSOR_I8       = 24,
+    DS4_TENSOR_IQ1_M    = 29,
     DS4_TENSOR_I32      = 26,
     DS4_TENSOR_BF16     = 30,
     DS4_TENSOR_MXFP4    = 39,
@@ -5101,6 +5114,12 @@ static DS4_MAYBE_UNUSED uint64_t routed_expert_block_bytes(uint32_t type) {
     case DS4_TENSOR_Q5_K:    return sizeof(block_q5_K);
     case DS4_TENSOR_Q6_K:    return sizeof(block_q6_K);
     case DS4_TENSOR_MXFP4:   return sizeof(block_mxfp4);
+    /* IQ1_M is sized here ahead of being accepted by
+     * tensor_is_routed_expert_type(): the block size is a property of the
+     * format, while admitting the type depends on a tiled MMQ loader that does
+     * not exist yet (see docs/IQ1_M_ROUTED_EXPERTS.md). Keeping the two
+     * separate means the tree never loads a model it cannot then run. */
+    case DS4_TENSOR_IQ1_M:   return sizeof(block_iq1_m);
     default:                 ds4_die("unsupported routed expert tensor type");
     }
     return 0;
