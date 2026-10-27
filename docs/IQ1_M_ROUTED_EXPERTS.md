@@ -316,11 +316,19 @@ Staged so that each step is independently verifiable, cheapest first.
    `tests/test_iq1_m_dequant.c` checks the layout against hand-derived values
    and is wired into `test` and `test-rocm`.
 
-   Note that `cuda/mmq/test/test_mmq_parity.cu` and `test_mmq_soa_tiles.cu`
-   have **no Makefile targets**, so they are source files rather than a
-   harness that can simply be pointed at a new type. Validating a GPU IQ1_M
-   kernel means first giving one of them a build rule, with the CPU
-   dequantiser as the oracle.
+   GPU parity is also covered now. `cuda/mmq/test/test_mmq_parity.cu` had
+   **no Makefile target at all**, so nothing checked those kernels numerically
+   on ROCm; `tests/test_mmq_parity_rocm` adds one, and an `IQ1_M/MOE_VEC` case
+   exercises `ds4_mmq_iq1_m_moe_vec` against a host dequantiser.
+
+   That host dequantiser needs its own copy of the codebook, because the GPU
+   build of `ggml-common.h` declares the grid `__device__` — the same reason
+   `iq2_host_tables.h` exists. `scripts/gen_iq1_grid.py` grew a namespace mode
+   and emits `cuda/mmq/test/iq1_host_tables.h` from the same source as the
+   engine-side table, so the two cannot drift apart.
+
+   `test_mmq_soa_tiles.cu` still has no target; it covers the IQ2_XXS SoA
+   tiles, which IQ1_M does not use.
 
 4. **`load_tiles_iq1_m` plus a finer-grained tile layout** — the hard step
    above. Only worth starting once 1-3 hold.
