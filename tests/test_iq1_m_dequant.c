@@ -33,7 +33,16 @@ typedef struct {
     uint8_t scales[QK_K / 32];
 } test_block_iq1_m;
 
+/* Mirrors block_q8_K in ds4.c. bsums is unused by the IQ1_M dot product but
+ * has to be present so the struct size and field offsets agree. */
+typedef struct {
+    float   d;
+    int8_t  qs[QK_K];
+    int16_t bsums[QK_K / 16];
+} test_block_q8_K;
+
 void ds4_test_dequantize_iq1_m_block(const void *block, float *out);
+float ds4_test_vec_dot_iq1_m_q8_K(int n, const void *x, const void *y);
 
 static int failures;
 
@@ -128,6 +137,59 @@ int main(void) {
     ds4_test_dequantize_iq1_m_block(&b, out);
     check("delta per 8: out[0] unchanged", out[0], -0.875f);
     check("delta per 8: out[8] flipped", out[8], -1.125f);
+
+    /* 7. The q8_K dot product against the dequantiser, which the cases above
+     *    have already pinned down. This is not circular: the dot product
+     *    restructures the arithmetic to keep the codebook contribution in
+     *    integers and apply each 16-value sub-scale once,
+     *
+     *      sum_j (grid[j]+delta)*q8[j] == sum_j grid[j]*q8[j] + delta*sum_j q8[j]
+     *
+     *    so agreeing with a plain sum over dequantised values is a real check
+     *    on that rearrangement, on the per-8 delta and per-16 sub-scale
+     *    indexing, and on the q8_K scale being applied exactly once.
+     *
+     *    Fields are filled from a fixed LCG so the case is reproducible and
+     *    exercises many codebook entries, sub-scales and delta signs at once
+     *    rather than the single-field blocks above. */
+    uint32_t rng = 12345u;
+#define NEXT (rng = rng * 1103515245u + 12345u, (rng >> 16))
+    test_block_iq1_m blocks[3];
+    test_block_q8_K act[3];
+    for (int b = 0; b < 3; b++) {
+        for (int j = 0; j < QK_K / 8; j++)  blocks[b].qs[j] = (uint8_t)(NEXT & 0xFF);
+        for (int j = 0; j < QK_K / 16; j++) blocks[b].qh[j] = (uint8_t)(NEXT & 0xFF);
+        /* Keep the top nibble of each scales word as a real f16: reuse the
+         * unit-scale pattern and vary only the sub-scale bits, so d stays 1.0
+         * and a stray NaN cannot mask a wrong sum. */
+        uint16_t sc[4] = { 0x0000, 0x0000, 0xC000, 0x3000 };
+        for (int w = 0; w < 4; w++) sc[w] |= (uint16_t)(NEXT & 0x0FFF);
+        memcpy(blocks[b].scales, sc, sizeof(sc));
+
+        act[b].d = 0.5f + (float)(NEXT % 100u) / 100.0f;
+        for (int j = 0; j < QK_K; j++) act[b].qs[j] = (int8_t)(NEXT & 0xFF);
+        memset(act[b].bsums, 0, sizeof(act[b].bsums));
+    }
+#undef NEXT
+
+    float reference = 0.0f;
+    for (int b = 0; b < 3; b++) {
+        float deq[QK_K];
+        ds4_test_dequantize_iq1_m_block(&blocks[b], deq);
+        for (int j = 0; j < QK_K; j++) {
+            reference += deq[j] * act[b].d * (float)act[b].qs[j];
+        }
+    }
+    const float got = ds4_test_vec_dot_iq1_m_q8_K(3 * QK_K, blocks, act);
+    const float tol = fabsf(reference) * 1e-4f + 1e-3f;
+    if (fabsf(got - reference) > tol) {
+        printf("  FAIL %-46s got %.4f want %.4f (tol %.4f)\n",
+               "q8_K dot matches dequantised sum", got, reference, tol);
+        failures++;
+    } else {
+        printf("  ok   %-46s %.4f vs %.4f\n",
+               "q8_K dot matches dequantised sum", got, reference);
+    }
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);

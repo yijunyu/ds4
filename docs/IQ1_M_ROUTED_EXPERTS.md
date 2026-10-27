@@ -20,11 +20,22 @@ this tree:
 | generic ggml mat-vec | instantiated, `cuda/mmq/mmvq.cu:1018` |
 | `ds4_mmq_vdr_mmvq_value<IQ1_M>` | **added on this branch** |
 | `ds4_mmq_vec_dot_q8_1` IQ1_M arm | **added on this branch** |
+| `ds4_mmq_iq1_m_moe_vec` entry point | **added on this branch** |
+| `DS4_TENSOR_IQ1_M`, `block_iq1_m` in `ds4.c` | **added on this branch** |
+| CPU `ds4_dequantize_iq1_m_block` | **added, tested** |
+| CPU `ds4_vec_dot_iq1_m_q8_K` | **added, tested** |
+| CPU `matvec_iq1_m_experts_{mid,accum}_prequant` | **added, wired into both dispatchers** |
 | `load_tiles_iq1_m` for tiled MMQ | **missing, and hard — see below** |
-| `DS4_TENSOR_IQ1_M` in `ds4.c` | **missing** |
+| `tensor_is_routed_expert_type` admits IQ1_M | **deliberately not yet** |
+| `ds41_stream_table` per-role typing | **not yet** |
+| GPU graph dispatch to `ds4_mmq_iq1_m_moe_vec` | **not yet** |
 
-So GPU *decode* for IQ1_M is reachable with small changes. GPU *prefill*
-through the tiled MMQ path is not.
+So GPU *decode* for IQ1_M is reachable with small changes, and the CPU
+reference path is complete. GPU *prefill* through the tiled MMQ path is not.
+
+Nothing loads yet: `tensor_is_routed_expert_type` is the gate and it stays shut
+until the paths behind it are all in place, so the tree is never in a state
+where it accepts a model it cannot run.
 
 ## Why there is no `load_tiles_iq1_m`
 
