@@ -116,6 +116,31 @@ machinery already tolerates `down` differing from gate/up, since that is
 exactly the V4.1 Q2 shape (IQ2_XXS gate/up, Q2_K down), so this is a widening
 of an existing distinction rather than a new one.
 
+## Upstreaming: where this can go
+
+Tested by cherry-picking this branch onto `antirez/main` (`ee7e840`) in a
+throwaway worktree. The first commit applies clean; the second conflicts on
+`Makefile`. Of the fourteen files touched, nine are new and transfer as-is,
+and exactly five are modifications to files that have diverged between
+`antirez/main` and this branch's base (`d32febf`):
+
+| file | main vs base | this branch adds |
+|---|---|---|
+| `ds4.c` | 3196+/2967- | 327+ |
+| `Makefile` | 143+/365- | 20+ |
+| `cuda/mmq/ds4_mmq.cu` | 113+/773- | 21+ |
+| `cuda/mmq/ds4_mmq.h` | 22+/0- | 15+ |
+| `.gitignore` | 11+/27- | 2+ |
+
+So a PR against `antirez/main` is feasible but not a cherry-pick: 385 lines of
+integration, all additions, re-applied by hand. They are small and localised —
+the type enum, the block struct and its static assert, the
+`routed_expert_block_bytes` case, two dispatcher arms, one template
+specialisation, one `if constexpr` arm, one entry point and two Makefile
+rules — with the bulk of `ds4.c`'s 327 being self-contained new functions.
+
+Against a fork already carrying the ROCm work it applies as-is.
+
 ## Fatal: ds4 cannot open the GSQ-RCO file at all, and IQ1_M is not why
 
 Everything below this section is still accurate about IQ1_M, but it is not the
